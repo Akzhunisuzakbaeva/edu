@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.sqlite3
+
+# venv
+venv/
+server/venv/
+
+# Django
+media/
+staticfiles/
+
+# Node / React / Vite
+server/frontend/node_modules/
+server/frontend/.vite/
+server/frontend/dist/
+
+# Environment files
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
