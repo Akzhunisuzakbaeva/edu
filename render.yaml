@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: edu-app-backend
+    env: python
+    rootDir: server
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
+    startCommand: python manage.py migrate && gunicorn edu_platform.wsgi:application --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.10
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: edu-app-backend.onrender.com
+      - key: FRONTEND_URL
+        value: https://your-frontend.vercel.app
+      - key: CORS_ALLOW_ALL_ORIGINS
+        value: "False"
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://your-frontend.vercel.app
+      - key: CSRF_TRUSTED_ORIGINS
+        value: https://your-frontend.vercel.app
+      - key: DATABASE_URL
+        fromDatabase:
+          name: edu-app-db
+          property: connectionString
+      - key: DATABASE_SSL_REQUIRE
+        value: "True"
+
+databases:
+  - name: edu-app-db
+    databaseName: edu_app
+    user: edu_app_user

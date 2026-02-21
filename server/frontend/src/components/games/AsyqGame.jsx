@@ -1,60 +1,63 @@
-import React, { useState, useEffect } from "react";
-import "./asyq.css";
+import React, { useEffect, useState } from "react";
 
-const questions = [
-  { q: "Python дегеніміз не?", a: "Бағдарламалау тілі" },
-  { q: "HTML не үшін қолданылады?", a: "Веб бет құрылымын жасау үшін" },
-  { q: "React — бұл ...", a: "Пайдаланушы интерфейсін жасау кітапханасы" },
-  { q: "Kazakhstan астанасы?", a: "Астана" },
-];
+export default function QuizGame({ quizId = 1 }) {
+  const [quiz, setQuiz] = useState(null);
+  const [i, setI] = useState(0);           // current question index
+  const [score, setScore] = useState(0);   // points
+  const [done, setDone] = useState(false);
 
-function AsyqGame() {
-  const [current, setCurrent] = useState(0);
-  const [score, setScore] = useState(0);
-  const [answer, setAnswer] = useState("");
-  const [message, setMessage] = useState("");
+  useEffect(() => {
+    fetch(`http://127.0.0.1:8000/api/quiz/${quizId}/`)
+      .then(r => r.json())
+      .then(setQuiz)
+      .catch(console.error);
+  }, [quizId]);
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (answer.trim().toLowerCase() === questions[current].a.toLowerCase()) {
-      setScore(score + 1);
-      setMessage("✅ Дұрыс жауап! Бір асық ұттың!");
+  if (!quiz) return <div>Жүктеліп жатыр…</div>;
+  if (!quiz.questions?.length) return <div>Сұрақтар жоқ</div>;
+
+  const q = quiz.questions[i];
+
+  const choose = (answer) => {
+    if (answer.is_correct) setScore(s => s + 1);
+    if (i + 1 < quiz.questions.length) {
+      setI(i + 1);
     } else {
-      setMessage("❌ Қате жауап, келесі сұрақ!");
+      setDone(true);
     }
-    setAnswer("");
-    setTimeout(() => {
-      setMessage("");
-      if (current < questions.length - 1) {
-        setCurrent(current + 1);
-      } else {
-        setMessage(`Ойын аяқталды! Жиналған асықтар саны: ${score + 1}`);
-      }
-    }, 1500);
   };
 
   return (
-    <div className="asyq-container">
-      <h2>🎯 Асық жинау ойыны</h2>
-      <p className="question">{questions[current].q}</p>
-      <form onSubmit={handleSubmit}>
-        <input
-          type="text"
-          value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          placeholder="Жауабыңды жаз..."
-          required
-        />
-        <button type="submit">Жауап беру</button>
-      </form>
-      <p className="message">{message}</p>
-      <div className="asyq-display">
-        {Array.from({ length: score }).map((_, i) => (
-          <div key={i} className="asyq"></div>
-        ))}
-      </div>
+    <div className="bg-panel rounded-xl p-4 max-w-2xl">
+      <h1 className="font-semibold text-lg mb-3">{quiz.title}</h1>
+
+      {!done ? (
+        <>
+          <div className="mb-2 text-sm text-ink-600">
+            Сұрақ {i + 1} / {quiz.questions.length}
+          </div>
+          <div className="mb-4 font-medium">{q.text}</div>
+
+          <div className="grid gap-2">
+            {q.answers.map((a) => (
+              <button
+                key={a.text}
+                onClick={() => choose(a)}
+                className="text-left rounded-lg border border-black/10 px-3 py-2 hover:bg-black/5"
+              >
+                {a.text}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="text-center">
+          <div className="text-xl font-semibold mb-2">Бітті! 🎉</div>
+          <div>
+            Ұпай: {score} / {quiz.questions.length}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
-export default AsyqGame;

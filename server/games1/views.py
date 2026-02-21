@@ -1,6 +1,8 @@
+# games1/views.py
 from rest_framework import viewsets
 from .models import GameSession, Player
 from .serializers import GameSessionSerializer, PlayerSerializer
+
 
 class GameSessionViewSet(viewsets.ModelViewSet):
     queryset = GameSession.objects.all()

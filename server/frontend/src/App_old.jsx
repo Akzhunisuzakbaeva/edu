@@ -1,6 +1,6 @@
 import React from "react";
 import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
-import SlideShow from "./components/SlideShow";
+import SlideShow from "./components/SlideShow.jsx";
 import AsyqGame from "./components/games/AsyqGame.jsx";
 
 function App() {

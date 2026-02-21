@@ -85,6 +85,8 @@ class SlideTemplateSerializer(serializers.ModelSerializer):
             "flashcards": ["cards"],  # [{front,back}]
             "poll": ["question", "options"],
             "crossword": ["rows", "cols", "cells"],  # cells: [{r,c,letter/clue}]
+            "sorting": ["items"],
+            "grouping": ["groups"],
         }.get(t, [])
         for k in required:
             if k not in cfg:
@@ -102,6 +104,10 @@ class SubmissionSerializer(serializers.ModelSerializer):
         slide = attrs.get("slide") or getattr(self.instance, "slide", None)
         template = attrs.get("template") or getattr(self.instance, "template", None)
         data = attrs.get("data", getattr(self.instance, "data", {})) or {}
+        duration_seconds = attrs.get(
+            "duration_seconds",
+            getattr(self.instance, "duration_seconds", 0),
+        )
 
         if not slide and not template:
             raise serializers.ValidationError({"non_field_errors": ["Either slide or template must be provided."]})
@@ -109,11 +115,21 @@ class SubmissionSerializer(serializers.ModelSerializer):
         if not isinstance(data, dict):
             raise serializers.ValidationError({"data": "Submission payload must be a JSON object."})
 
+        if duration_seconds is not None and duration_seconds < 0:
+            raise serializers.ValidationError({"duration_seconds": "Duration cannot be negative."})
+
         template_type = None
         if template is not None:
             template_type = template.template_type
 
-        if template_type in {"quiz", "poll"} and "answer" not in data:
-            raise serializers.ValidationError({"data": {"answer": "This field is required for quiz and poll submissions."}})
+        if template_type == "quiz":
+            if "answer" not in data and "answers" not in data:
+                raise serializers.ValidationError(
+                    {"data": {"answer": "Quiz үшін answer немесе answers өрісі қажет."}}
+                )
+        if template_type == "poll" and "answer" not in data:
+            raise serializers.ValidationError(
+                {"data": {"answer": "This field is required for poll submissions."}}
+            )
 
         return attrs

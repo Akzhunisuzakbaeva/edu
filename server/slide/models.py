@@ -1,55 +1,50 @@
+from django.conf import settings
 from django.db import models, transaction
 from django.db.models import Max
 from django.core.exceptions import ValidationError
-from django.contrib.auth import get_user_model
-from lessons.models import Lesson
 from django.utils import timezone
-
-User = get_user_model()
 
 
 def _empty_dict():
-    """JSONField үшін қауіпсіз mutable default."""
     return {}
 
 
+USER_MODEL = settings.AUTH_USER_MODEL
+
+
 class Slide(models.Model):
-    """
-    Бір сабақ ішіндегі бір слайд.
-    """
     lesson = models.ForeignKey(
-        Lesson,
+        "lessons.Lesson",
         on_delete=models.CASCADE,
-        related_name='slides',
+        related_name="slides",
     )
-    title = models.CharField(max_length=255, default='Untitled')
-    order = models.PositiveIntegerField(default=1)  # сабақ ішіндегі реті
+    title = models.CharField(max_length=255, default="Untitled")
+    order = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["lesson_id", "order", "id"]
-        unique_together = [("lesson", "order")]
+        constraints = [
+            models.UniqueConstraint(fields=["lesson", "order"], name="uniq_slide_order_per_lesson")
+        ]
 
     def __str__(self):
         return f"{self.title} (lesson={self.lesson_id}, order={self.order})"
 
     def save(self, *args, **kwargs):
+        # жаңа слайд болса ғана order авто-есептейміз
         if self.pk is None:
             with transaction.atomic():
-                if self.lesson_id is None:
-                    # Let default FK validation handle missing lesson
+                if not self.lesson_id:
                     return super().save(*args, **kwargs)
 
-                existing = None
-                if self.order is not None:
-                    existing = (
-                        Slide.objects.filter(lesson_id=self.lesson_id, order=self.order)
-                        .exclude(pk=self.pk)
-                        .exists()
-                    )
+                # Егер order бос немесе дубль болса, соңына қоямыз
+                exists_same = Slide.objects.filter(
+                    lesson_id=self.lesson_id, order=self.order
+                ).exists()
 
-                if self.order is None or existing:
+                if self.order is None or exists_same:
                     max_order = (
                         Slide.objects.filter(lesson_id=self.lesson_id)
                         .aggregate(Max("order"))
@@ -63,12 +58,6 @@ class Slide(models.Model):
 
 
 class SlideObject(models.Model):
-    """
-    Слайд ішіндегі кез келген элемент.
-    - object_type контенттің түрін анықтайды
-    - data: түрге тән қасиеттер (мәтін, url, path, түс, т.б.)
-    - position: {x, y, width, height} — пиксельмен немесе %-пен (фронтенд шешеді)
-    """
     TEXT = "text"
     IMAGE = "image"
     DRAWING = "drawing"
@@ -88,31 +77,19 @@ class SlideObject(models.Model):
     slide = models.ForeignKey(
         Slide,
         on_delete=models.CASCADE,
-        related_name='slide_objects',  # avoid clobbering Slide.objects manager
+        related_name="slide_objects",
     )
-    object_type = models.CharField(
-        max_length=32,
-        choices=OBJECT_TYPE_CHOICES,
-    )
+    object_type = models.CharField(max_length=32, choices=OBJECT_TYPE_CHOICES)
 
-    # Түрге тән деректер (мысалы)
-    # text:   {"text": "...", "fontSize": 24, "color": "#fff", ...}
-    # image:  {"url": "https://...", "alt": "..."}
-    # shape:  {"shapeType": "rect|circle|line", "stroke": "#...", "fill": "...", ...}
-    # drawing:{"path":[[x,y],[x,y],...], "stroke":"#...", "strokeWidth":4}
-    # attachment: {"name":"Homework.pdf", "url":"https://..."}
     data = models.JSONField(default=_empty_dict, help_text="Typed payload")
-
-    # Орналасу (пиксель немесе пайыз — фронтенд интерпретациялайды)
-    # {"x": 100, "y": 150, "width": 400, "height": 120}
     position = models.JSONField(default=_empty_dict)
 
-    z_index = models.IntegerField(default=0)   # қабат реті
-    rotation = models.FloatField(default=0.0)  # градус
+    z_index = models.IntegerField(default=0)
+    rotation = models.FloatField(default=0.0)
     is_locked = models.BooleanField(default=False)
 
     author = models.ForeignKey(
-        User,
+        USER_MODEL,
         on_delete=models.SET_NULL,
         related_name="slide_objects",
         null=True,
@@ -132,16 +109,7 @@ class SlideObject(models.Model):
     def __str__(self):
         return f"{self.object_type} on slide {self.slide_id}"
 
-    # Негізгі валидация (миграцияға әсер етпейді, сақтарда/админде жұмыс істейді)
     def clean(self):
-        # position құрамын жеңіл тексеру
-        pos = self.position or {}
-        for k in ("x", "y", "width", "height"):
-            if k not in pos:
-                # позиция міндетті емес — фронтенд кейін де бере алады,
-                # сондықтан қатты талап етпейміз. Қаласаңыз, мына check-ті қатаң етесіз.
-                continue
-
         d = self.data or {}
 
         if self.object_type == self.TEXT and "text" not in d:
@@ -158,24 +126,22 @@ class SlideObject(models.Model):
 
 
 class SlideTemplate(models.Model):
-    """
-    Бір немесе бірнеше слайдқа қолданылатын шаблон.
-    """
     TEMPLATE_TYPE_CHOICES = [
         ("quiz", "Quiz"),
         ("matching", "Matching"),
         ("flashcards", "Flashcards"),
         ("poll", "Poll/Survey"),
         ("crossword", "Crossword"),
+        ("sorting", "Sorting"),
+        ("grouping", "Grouping"),
     ]
 
     title = models.CharField(max_length=255)
-    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="templates")
+    author = models.ForeignKey(USER_MODEL, on_delete=models.CASCADE, related_name="templates")
     preview_image = models.ImageField(upload_to="template_previews/", null=True, blank=True)
     template_type = models.CharField(max_length=32, choices=TEMPLATE_TYPE_CHOICES, default="quiz")
 
-    # Template configuration (e.g., quiz Q&A, matching pairs, etc.)
-    data = models.JSONField(help_text="Template config (e.g., quiz Q&A, matching pairs, etc.)")
+    data = models.JSONField(help_text="Template config (quiz/matching/etc.)")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -201,13 +167,16 @@ class Submission(models.Model):
         blank=True,
     )
     user = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        related_name="submissions",
-        null=True,
-        blank=True,
-    )
+    USER_MODEL,
+    on_delete=models.SET_NULL,
+    related_name="slide_submissions",
+    related_query_name="slide_submission",
+    null=True,
+    blank=True,
+)
+
     data = models.JSONField(default=_empty_dict)
+    duration_seconds = models.PositiveIntegerField(default=0)
     score = models.FloatField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
