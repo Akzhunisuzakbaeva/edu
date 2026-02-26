@@ -1,6 +1,6 @@
 import random
 import string
-from typing import Optional
+from typing import Optional, Tuple, List
 
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from lessons.models import Lesson
+from slide.models import Slide, SlideObject
 from .models import LiveSession, LiveParticipant, LiveSlideCheckin
 from .serializers import (
     LiveSessionSerializer,
@@ -21,6 +22,24 @@ from .serializers import (
     HeartbeatSerializer,
     SlideCheckinSerializer,
     LiveTimerSerializer,
+)
+
+CLEAR_CODE_TRANSLATION = str.maketrans(
+    {
+        "А": "A",
+        "В": "B",
+        "С": "C",
+        "Е": "E",
+        "Н": "H",
+        "К": "K",
+        "М": "M",
+        "О": "O",
+        "Р": "P",
+        "Т": "T",
+        "У": "Y",
+        "Х": "X",
+        "І": "I",
+    }
 )
 
 
@@ -36,6 +55,11 @@ def _generate_live_code():
         if not LiveSession.objects.filter(is_active=True, live_code=code).exists():
             return code
     return "".join(random.choice(alphabet) for _ in range(8))
+
+
+def _normalize_live_code(value: str) -> str:
+    raw = (value or "").strip().upper().translate(CLEAR_CODE_TRANSLATION)
+    return "".join(ch for ch in raw if ch.isalnum())
 
 
 class StartLiveSessionView(APIView):
@@ -150,7 +174,7 @@ class LiveSessionByCodeView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, code):
-        normalized = (code or "").strip().upper()
+        normalized = _normalize_live_code(code)
         live = (
             LiveSession.objects.select_related("lesson", "teacher")
             .filter(is_active=True, live_code__iexact=normalized)
@@ -208,6 +232,72 @@ def _upsert_participant(live: LiveSession, user, display_name: str = ""):
     return participant
 
 
+def _live_slide_at_index(live: LiveSession, slide_index: Optional[int] = None) -> Tuple[Optional[Slide], int, int]:
+    slides = list(
+        Slide.objects.filter(lesson=live.lesson)
+        .only("id", "title", "order")
+        .order_by("order", "id")
+    )
+    total = len(slides)
+    if total == 0:
+        return None, 0, 0
+    idx = slide_index if slide_index is not None else live.current_slide_index
+    idx = max(0, min(int(idx), total - 1))
+    return slides[idx], idx, total
+
+
+def _slide_objects_payload(slide: Slide) -> List[dict]:
+    objects = (
+        SlideObject.objects.filter(slide=slide)
+        .only("id", "object_type", "data", "position", "z_index")
+        .order_by("z_index", "id")
+    )
+    return [
+        {
+            "id": obj.id,
+            "object_type": obj.object_type,
+            "data": obj.data or {},
+            "position": obj.position or {},
+            "z_index": obj.z_index or 0,
+        }
+        for obj in objects
+    ]
+
+
+def _evaluate_slide_answer(slide: Slide, answer_data: dict) -> Tuple[bool, bool, str]:
+    checkbox_objects = list(
+        SlideObject.objects.filter(slide=slide, object_type=SlideObject.CHECKBOX).only("id", "data")
+    )
+    if not checkbox_objects:
+        return False, False, "Бұл слайдта бағаланатын жауап жоқ."
+
+    correct_ids = sorted(
+        obj.id for obj in checkbox_objects if bool((obj.data or {}).get("correct"))
+    )
+    if not correct_ids:
+        return False, False, "Бұл слайдта дұрыс жауап белгіленбеген."
+
+    raw_selected = answer_data.get("selected_object_ids")
+    if not isinstance(raw_selected, list):
+        raw_selected = []
+
+    allowed_ids = {obj.id for obj in checkbox_objects}
+    selected_ids = []
+    for item in raw_selected:
+        try:
+            parsed = int(item)
+        except (TypeError, ValueError):
+            continue
+        if parsed in allowed_ids:
+            selected_ids.append(parsed)
+    selected_ids = sorted(set(selected_ids))
+
+    is_correct = selected_ids == correct_ids
+    if is_correct:
+        return True, True, "Дұрыс жауап. Ұпай қосылды."
+    return True, False, "Қате жауап. Ұпай қосылмайды."
+
+
 class JoinLiveSessionView(APIView):
     """
     POST /api/live/sessions/<pk>/join/
@@ -262,6 +352,39 @@ class LiveHeartbeatView(APIView):
         )
 
 
+class LiveCurrentSlideView(APIView):
+    """
+    GET /api/live/sessions/<pk>/current-slide/
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk):
+        live = get_object_or_404(LiveSession, pk=pk, is_active=True)
+        if request.user.id != live.teacher_id:
+            _upsert_participant(live, request.user)
+
+        slide, safe_index, total = _live_slide_at_index(live)
+        if not slide:
+            return Response(
+                {
+                    "slide_index": 0,
+                    "total_slides": 0,
+                    "slide": None,
+                    "objects": [],
+                }
+            )
+
+        return Response(
+            {
+                "slide_index": safe_index,
+                "total_slides": total,
+                "slide": {"id": slide.id, "title": slide.title},
+                "objects": _slide_objects_payload(slide),
+            }
+        )
+
+
 class LiveSlideCheckinView(APIView):
     """
     POST /api/live/sessions/<pk>/checkin/
@@ -277,6 +400,7 @@ class LiveSlideCheckinView(APIView):
 
         slide_index = serializer.validated_data["slide_index"]
         reaction_ms = serializer.validated_data.get("reaction_ms", 0)
+        answer_data = serializer.validated_data.get("answer_data") or {}
         participant = _upsert_participant(live, request.user)
 
         existing = LiveSlideCheckin.objects.filter(
@@ -288,6 +412,8 @@ class LiveSlideCheckinView(APIView):
                 {
                     "awarded_points": 0,
                     "rank": None,
+                    "is_correct": False,
+                    "is_answerable": True,
                     "detail": "Бұл слайд үшін чек-ин бұрын жіберілген.",
                     "participant": LiveParticipantSerializer(participant).data,
                     "leaderboard": _leaderboard_data(live, limit=12),
@@ -295,20 +421,80 @@ class LiveSlideCheckinView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        rank = (
-            LiveSlideCheckin.objects.filter(
-                live_session=live,
-                slide_index=slide_index,
-            ).count()
-            + 1
-        )
+        if live.source_type != LiveSession.SOURCE_SLIDES:
+            return Response(
+                {
+                    "awarded_points": 0,
+                    "rank": None,
+                    "is_correct": False,
+                    "is_answerable": False,
+                    "detail": "Ұпай есептеу тек Slides режиміндегі сұрақтарда жұмыс істейді.",
+                    "participant": LiveParticipantSerializer(participant).data,
+                    "leaderboard": _leaderboard_data(live, limit=12),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        current_slide, safe_index, _ = _live_slide_at_index(live)
+        if not current_slide:
+            return Response(
+                {
+                    "awarded_points": 0,
+                    "rank": None,
+                    "is_correct": False,
+                    "is_answerable": False,
+                    "detail": "Бұл live сабақта слайд табылмады.",
+                    "participant": LiveParticipantSerializer(participant).data,
+                    "leaderboard": _leaderboard_data(live, limit=12),
+                },
+                status=status.HTTP_200_OK,
+            )
+        if slide_index != safe_index:
+            return Response(
+                {
+                    "awarded_points": 0,
+                    "rank": None,
+                    "is_correct": False,
+                    "is_answerable": False,
+                    "detail": "Мұғалім басқа слайдқа ауысты. Қайта жауап беріңіз.",
+                    "participant": LiveParticipantSerializer(participant).data,
+                    "leaderboard": _leaderboard_data(live, limit=12),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        is_answerable, is_correct, answer_detail = _evaluate_slide_answer(current_slide, answer_data)
+        if not is_answerable:
+            return Response(
+                {
+                    "awarded_points": 0,
+                    "rank": None,
+                    "is_correct": False,
+                    "is_answerable": False,
+                    "detail": answer_detail,
+                    "participant": LiveParticipantSerializer(participant).data,
+                    "leaderboard": _leaderboard_data(live, limit=12),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        rank = None
         base_points = 30
-        if rank == 1:
-            base_points = 100
-        elif rank == 2:
-            base_points = 70
-        elif rank == 3:
-            base_points = 50
+        if is_correct:
+            rank = (
+                LiveSlideCheckin.objects.filter(
+                    live_session=live,
+                    slide_index=slide_index,
+                    points_awarded__gt=0,
+                ).count()
+                + 1
+            )
+            if rank == 1:
+                base_points = 100
+            elif rank == 2:
+                base_points = 70
+            elif rank == 3:
+                base_points = 50
 
         time_factor = 1.0
         if live.timer_duration_seconds > 0 and live.timer_started_at and live.timer_ends_at:
@@ -317,7 +503,7 @@ class LiveSlideCheckinView(APIView):
             else:
                 time_factor = max(0.3, live.timer_remaining_seconds / float(live.timer_duration_seconds))
 
-        awarded = max(0, int(round(base_points * time_factor)))
+        awarded = max(0, int(round(base_points * time_factor))) if is_correct else 0
 
         LiveSlideCheckin.objects.create(
             live_session=live,
@@ -327,10 +513,13 @@ class LiveSlideCheckinView(APIView):
             points_awarded=awarded,
         )
 
-        if participant.last_checked_slide_index + 1 == slide_index:
-            participant.streak += 1
+        if is_correct:
+            if participant.last_checked_slide_index + 1 == slide_index:
+                participant.streak += 1
+            else:
+                participant.streak = 1
         else:
-            participant.streak = 1
+            participant.streak = 0
         participant.best_streak = max(participant.best_streak, participant.streak)
         participant.last_checked_slide_index = slide_index
         participant.current_slide_index = max(participant.current_slide_index, slide_index)
@@ -352,6 +541,9 @@ class LiveSlideCheckinView(APIView):
             {
                 "awarded_points": awarded,
                 "rank": rank,
+                "is_correct": bool(is_correct),
+                "is_answerable": True,
+                "detail": answer_detail,
                 "participant": LiveParticipantSerializer(participant).data,
                 "leaderboard": _leaderboard_data(live, limit=12),
             },

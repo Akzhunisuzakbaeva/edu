@@ -56,10 +56,18 @@ class LiveSessionSerializer(serializers.ModelSerializer):
             "ended_at",
         ]
 
+    def _absolute_url(self, url: str) -> str:
+        if not url:
+            return ""
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(url)
+        return url
+
     def get_pptx_file_url(self, obj):
         if not obj.pptx_file:
             return ""
-        return obj.pptx_file.url
+        return self._absolute_url(obj.pptx_file.url)
 
     def get_content_url(self, obj):
         if obj.source_type == LiveSession.SOURCE_CANVA:
@@ -68,14 +76,14 @@ class LiveSessionSerializer(serializers.ModelSerializer):
             return obj.external_view_url or ""
         if obj.source_type == LiveSession.SOURCE_PPTX:
             if obj.pptx_preview_pdf:
-                return obj.pptx_preview_pdf.url
-            return obj.pptx_file.url if obj.pptx_file else ""
+                return self._absolute_url(obj.pptx_preview_pdf.url)
+            return self._absolute_url(obj.pptx_file.url) if obj.pptx_file else ""
         return ""
 
     def get_pptx_preview_url(self, obj):
         if not obj.pptx_preview_pdf:
             return ""
-        return obj.pptx_preview_pdf.url
+        return self._absolute_url(obj.pptx_preview_pdf.url)
 
     def get_timer_is_running(self, obj):
         return obj.timer_is_running
@@ -181,3 +189,11 @@ class HeartbeatSerializer(serializers.Serializer):
 class SlideCheckinSerializer(serializers.Serializer):
     slide_index = serializers.IntegerField(min_value=0)
     reaction_ms = serializers.IntegerField(min_value=0, max_value=120000, required=False, default=0)
+    answer_data = serializers.JSONField(required=False, default=dict)
+
+    def validate_answer_data(self, value):
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("answer_data объект (dict) болуы керек.")
+        return value

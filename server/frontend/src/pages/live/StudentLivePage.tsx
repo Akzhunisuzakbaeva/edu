@@ -1,18 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { getSlides, getSlideObjects } from "../../api/slide";
 import {
   getActiveLives,
   getLiveByCode,
+  getLiveCurrentSlide,
   getLiveLeaderboard,
   joinLive,
   liveHeartbeat,
+  LiveCurrentSlideDto,
   LiveParticipantDto,
   LiveSessionDto,
   submitLiveCheckin,
 } from "../../services/live";
 
-type Slide = { id: number; title?: string };
 type SlideObject = {
   id: number;
   object_type: string;
@@ -32,6 +32,29 @@ function sourceLabel(sourceType?: string) {
   return "Slides";
 }
 
+const LOOKALIKE_CYRILLIC_MAP: Record<string, string> = {
+  А: "A",
+  В: "B",
+  С: "C",
+  Е: "E",
+  Н: "H",
+  К: "K",
+  М: "M",
+  О: "O",
+  Р: "P",
+  Т: "T",
+  У: "Y",
+  Х: "X",
+  І: "I",
+};
+
+function normalizeLiveCode(value: string) {
+  return Array.from((value || "").toUpperCase())
+    .map((char) => LOOKALIKE_CYRILLIC_MAP[char] ?? char)
+    .filter((char) => /[A-Z0-9]/.test(char))
+    .join("");
+}
+
 function withPdfViewerOptions(url: string) {
   if (!url) return "";
   if (url.includes("#")) return url;
@@ -46,7 +69,7 @@ function getTimerRemainingSeconds(live?: LiveSessionDto | null) {
 
 export default function StudentLivePage() {
   const [searchParams] = useSearchParams();
-  const initialCode = (searchParams.get("code") || "").toUpperCase();
+  const initialCode = normalizeLiveCode(searchParams.get("code") || "");
 
   const [sessions, setSessions] = useState<LiveSessionDto[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -58,9 +81,11 @@ export default function StudentLivePage() {
   const [slideSeenAt, setSlideSeenAt] = useState<number>(Date.now());
   const [checkinBusy, setCheckinBusy] = useState(false);
   const [checkinMessage, setCheckinMessage] = useState<string>("");
+  const [checkinMessageTone, setCheckinMessageTone] = useState<"success" | "error" | "neutral">("neutral");
 
-  const [slides, setSlides] = useState<Slide[]>([]);
   const [objects, setObjects] = useState<SlideObject[]>([]);
+  const [currentSlideMeta, setCurrentSlideMeta] = useState<LiveCurrentSlideDto["slide"]>(null);
+  const [selectedObjectIds, setSelectedObjectIds] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -78,7 +103,7 @@ export default function StudentLivePage() {
         } else {
           setConnected(false);
           setCurrent(null);
-          setError("Тірі сабақ аяқталды.");
+          setError("Live сабақ аяқталды.");
         }
       }
     } catch (e) {
@@ -112,45 +137,26 @@ export default function StudentLivePage() {
 
   useEffect(() => {
     if (!connected || !current || current.source_type !== "slides") {
-      setSlides([]);
+      setCurrentSlideMeta(null);
       setObjects([]);
       return;
     }
 
-    const loadSlides = async () => {
+    const loadCurrentSlide = async () => {
       try {
-        const list = await getSlides({ lesson: current.lesson });
-        setSlides(list || []);
-      } catch (e) {
-        console.error(e);
-        setError("Slide тізімін жүктеу кезінде қате.");
-      }
-    };
-    loadSlides();
-  }, [connected, current?.id, current?.source_type, current?.lesson]);
-
-  useEffect(() => {
-    if (!connected || !current || current.source_type !== "slides") {
-      setObjects([]);
-      return;
-    }
-    const slide = slides[current.current_slide_index];
-    if (!slide) {
-      setObjects([]);
-      return;
-    }
-
-    const loadObjects = async () => {
-      try {
-        const list = await getSlideObjects({ slide: slide.id });
-        setObjects(list || []);
+        const res = await getLiveCurrentSlide(current.id);
+        const data = toData<LiveCurrentSlideDto>(res);
+        setCurrentSlideMeta(data?.slide ?? null);
+        setObjects(data?.objects ?? []);
       } catch (e) {
         console.error(e);
         setError("Слайд объектілерін жүктеу кезінде қате.");
+        setCurrentSlideMeta(null);
+        setObjects([]);
       }
     };
-    loadObjects();
-  }, [connected, current?.id, current?.source_type, current?.current_slide_index, slides]);
+    loadCurrentSlide();
+  }, [connected, current?.id, current?.source_type, current?.current_slide_index]);
 
   useEffect(() => {
     if (!connected || !current?.id) {
@@ -169,6 +175,7 @@ export default function StudentLivePage() {
         setParticipant(data?.participant ?? null);
         setLeaderboard(data?.leaderboard ?? []);
         setCheckinMessage("");
+        setCheckinMessageTone("neutral");
       } catch (e) {
         console.error(e);
       }
@@ -211,10 +218,12 @@ export default function StudentLivePage() {
   useEffect(() => {
     setSlideSeenAt(Date.now());
     setCheckinMessage("");
+    setCheckinMessageTone("neutral");
+    setSelectedObjectIds([]);
   }, [current?.id, current?.current_slide_index]);
 
   const handleConnectByCode = async () => {
-    const normalized = liveCode.trim().toUpperCase();
+    const normalized = normalizeLiveCode(liveCode);
     if (!normalized) {
       setError("Live код енгізіңіз.");
       return;
@@ -227,7 +236,19 @@ export default function StudentLivePage() {
       setCurrent(live);
       setSelectedId(live.id);
       setConnected(true);
+      setLiveCode(normalized);
     } catch {
+      const fallback = sessions.find(
+        (item) => normalizeLiveCode(item.live_code || "") === normalized
+      );
+      if (fallback) {
+        setCurrent(fallback);
+        setSelectedId(fallback.id);
+        setConnected(true);
+        setLiveCode(normalized);
+        setError(null);
+        return;
+      }
       setError("Код қате немесе live аяқталған.");
     } finally {
       setLoading(false);
@@ -248,15 +269,18 @@ export default function StudentLivePage() {
     setLoading(true);
     setError(null);
     if (chosen.live_code) {
-      getLiveByCode(chosen.live_code)
+      const normalizedCode = normalizeLiveCode(chosen.live_code);
+      getLiveByCode(normalizedCode)
         .then((res) => {
           const live = toData<LiveSessionDto>(res);
           setCurrent(live);
           setConnected(true);
+          setLiveCode(normalizedCode);
         })
         .catch(() => {
           setCurrent(chosen);
           setConnected(true);
+          setLiveCode(normalizedCode);
         })
         .finally(() => setLoading(false));
       return;
@@ -269,11 +293,32 @@ export default function StudentLivePage() {
   const handleDisconnect = () => {
     setConnected(false);
     setCurrent(null);
-    setSlides([]);
     setObjects([]);
+    setCurrentSlideMeta(null);
+    setSelectedObjectIds([]);
     setParticipant(null);
     setLeaderboard([]);
     setCheckinMessage("");
+    setCheckinMessageTone("neutral");
+  };
+
+  const checkboxObjects = useMemo(
+    () => objects.filter((obj) => obj.object_type === "checkbox"),
+    [objects]
+  );
+
+  const isScorableSlide = useMemo(
+    () =>
+      checkboxObjects.some((obj) =>
+        Object.prototype.hasOwnProperty.call(obj?.data || {}, "correct")
+      ),
+    [checkboxObjects]
+  );
+
+  const toggleOption = (objectId: number) => {
+    setSelectedObjectIds((prev) =>
+      prev.includes(objectId) ? prev.filter((id) => id !== objectId) : [...prev, objectId]
+    );
   };
 
   const handleCheckin = async () => {
@@ -282,17 +327,21 @@ export default function StudentLivePage() {
     setError(null);
     try {
       const reactionMs = Math.max(0, Date.now() - slideSeenAt);
-      const res = await submitLiveCheckin(current.id, current.current_slide_index, reactionMs);
+      const res = await submitLiveCheckin(current.id, current.current_slide_index, reactionMs, {
+        selected_object_ids: selectedObjectIds,
+      });
       const data = toData<any>(res);
       setParticipant(data?.participant ?? null);
       setLeaderboard(data?.leaderboard ?? []);
 
-      if (data?.awarded_points > 0) {
+      if (data?.is_correct && data?.awarded_points > 0) {
         setCheckinMessage(
           `+${data.awarded_points} ұпай · орын #${data.rank ?? "-"} · streak ${data?.participant?.streak ?? 0}`
         );
+        setCheckinMessageTone("success");
       } else {
         setCheckinMessage(data?.detail || "Бұл слайд үшін чек-ин бұрын жіберілген.");
+        setCheckinMessageTone(data?.is_correct ? "success" : "error");
       }
     } catch (e) {
       console.error(e);
@@ -323,6 +372,9 @@ export default function StudentLivePage() {
   const timerLabel = `${Math.floor(timerRemainingSeconds / 60)}:${String(
     timerRemainingSeconds % 60
   ).padStart(2, "0")}`;
+  const checkinDisabled =
+    checkinBusy ||
+    (current?.source_type === "slides" && isScorableSlide && selectedObjectIds.length === 0);
 
   return (
     <div className="space-y-5">
@@ -377,7 +429,7 @@ export default function StudentLivePage() {
             <div className="flex gap-2">
               <input
                 value={liveCode}
-                onChange={(e) => setLiveCode(e.target.value.toUpperCase())}
+                onChange={(e) => setLiveCode(normalizeLiveCode(e.target.value))}
                 className="flex-1 border rounded-xl px-3 py-2.5 text-sm bg-slate-50 uppercase outline-none focus:ring-2 focus:ring-sky-200"
                 placeholder="Мысалы: TYJMD8"
               />
@@ -427,6 +479,9 @@ export default function StudentLivePage() {
           <div className="px-4 md:px-5 py-3 border-b border-slate-100 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm text-slate-700">
               Lesson: <span className="font-semibold text-slate-900">{current.lesson_title ?? `Lesson ${current.lesson}`}</span>
+              {currentSlideMeta?.title ? (
+                <span className="ml-2 text-slate-500">· {currentSlideMeta.title}</span>
+              ) : null}
             </div>
             <button
               onClick={handleDisconnect}
@@ -439,21 +494,42 @@ export default function StudentLivePage() {
           <div className="px-4 md:px-5 py-3 border-b border-slate-100 bg-white grid gap-3 lg:grid-cols-[1fr_280px]">
             <div className="space-y-2">
               <div className="text-xs text-slate-600">
-                Слайдты көрген соң жауап бергенде <b>Жауап жіберу</b> батырмасын басыңыз. Жылдам жіберсеңіз ұпай жоғары.
+                {current.source_type === "slides"
+                  ? "Слайд ішінен жауапты белгілеңіз де, Жауап жіберу батырмасын басыңыз."
+                  : "Бұл режимде тек көру бар. Ұпай бағаланатын сұрақ тек Slides режимінде есептеледі."}
               </div>
+              {current.source_type === "slides" && isScorableSlide && (
+                <div className="text-[11px] text-slate-500">
+                  Дұрыс жауап болса ғана ұпай қосылады. Қате жауапқа 0 ұпай.
+                </div>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => void handleCheckin()}
-                  disabled={checkinBusy}
+                  disabled={checkinDisabled}
                   className={[
                     "px-3 py-1.5 rounded-lg text-xs font-semibold border",
-                    checkinBusy ? "bg-slate-200 text-slate-500 border-slate-300 cursor-not-allowed" : "bg-black text-white border-black hover:bg-slate-800",
+                    checkinDisabled
+                      ? "bg-slate-200 text-slate-500 border-slate-300 cursor-not-allowed"
+                      : "bg-black text-white border-black hover:bg-slate-800",
                   ].join(" ")}
                 >
                   {checkinBusy ? "..." : "Жауап жіберу"}
                 </button>
                 {checkinMessage && (
-                  <span className="text-xs px-2.5 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700">
+                  <span
+                    className={[
+                      "text-xs px-2.5 py-1.5 rounded-lg border",
+                      checkinMessageTone === "success" &&
+                        "border-emerald-200 bg-emerald-50 text-emerald-700",
+                      checkinMessageTone === "error" &&
+                        "border-rose-200 bg-rose-50 text-rose-700",
+                      checkinMessageTone === "neutral" &&
+                        "border-slate-200 bg-slate-50 text-slate-700",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
                     {checkinMessage}
                   </span>
                 )}
@@ -481,37 +557,74 @@ export default function StudentLivePage() {
 
           {current.source_type === "slides" && (
             <div className="p-4 md:p-5">
-              <div className="min-h-[460px] rounded-2xl border border-slate-200 overflow-hidden bg-slate-100 relative">
-                <div className="absolute inset-4 rounded-2xl bg-white border border-black/5 shadow-sm" />
-                {objects
-                  .sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0))
-                  .map((o) => {
-                    const pos = o.position || {};
-                    const style = {
-                      position: "absolute" as const,
-                      left: pos.x ?? 80,
-                      top: pos.y ?? 120,
-                      width: pos.width ?? 300,
-                      height: pos.height ?? 120,
-                    };
-                    if (o.object_type === "image" && o.data?.url) {
-                      return (
-                        <img
-                          key={o.id}
-                          src={o.data.url}
-                          alt=""
-                          style={style}
-                          className="object-cover rounded-lg"
-                        />
-                      );
-                    }
-                    const text = o.object_type === "checkbox" ? `☐ ${o.data?.label ?? ""}` : o.data?.text ?? "";
-                    return (
-                      <div key={o.id} style={style} className="text-sm text-slate-700">
-                        {text}
-                      </div>
-                    );
-                  })}
+              <div className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-100 p-3">
+                <div className="relative w-full aspect-[16/9] rounded-xl bg-white border border-black/5 shadow-sm overflow-hidden">
+                  {objects.length === 0 ? (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500">
+                      Бұл слайдта контент жоқ.
+                    </div>
+                  ) : (
+                    objects
+                      .slice()
+                      .sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0))
+                      .map((o) => {
+                        const pos = o.position || {};
+                        const x = Number(pos.x ?? 80);
+                        const y = Number(pos.y ?? 120);
+                        const w = Number(pos.width ?? 320);
+                        const h = Number(pos.height ?? 56);
+                        const style = {
+                          position: "absolute" as const,
+                          left: `${(x / 1280) * 100}%`,
+                          top: `${(y / 720) * 100}%`,
+                          width: `${Math.max(8, (w / 1280) * 100)}%`,
+                          minHeight: `${Math.max(6, (h / 720) * 100)}%`,
+                        };
+
+                        if (o.object_type === "image" && o.data?.url) {
+                          return (
+                            <img
+                              key={o.id}
+                              src={o.data.url}
+                              alt=""
+                              style={style}
+                              className="object-cover rounded-lg"
+                            />
+                          );
+                        }
+
+                        if (o.object_type === "checkbox") {
+                          const checked = selectedObjectIds.includes(o.id);
+                          return (
+                            <label
+                              key={o.id}
+                              style={style}
+                              className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white/95 px-2 py-1 text-xs md:text-sm text-slate-800 shadow-sm cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleOption(o.id)}
+                                className="h-4 w-4"
+                              />
+                              <span className="leading-snug">{o.data?.label ?? ""}</span>
+                            </label>
+                          );
+                        }
+
+                        return (
+                          <div key={o.id} style={style} className="text-xs md:text-sm text-slate-700 leading-snug">
+                            {o.data?.text ?? ""}
+                          </div>
+                        );
+                      })
+                  )}
+                </div>
+                {checkboxObjects.length > 0 && (
+                  <div className="mt-3 text-[11px] text-slate-500">
+                    Белгіленді: <span className="font-semibold">{selectedObjectIds.length}</span>
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -45,6 +45,21 @@ export type LiveSessionDto = {
   ended_at?: string | null;
 };
 
+export type LiveSlideObjectDto = {
+  id: number;
+  object_type: string;
+  data: any;
+  position: { x?: number; y?: number; width?: number; height?: number };
+  z_index?: number;
+};
+
+export type LiveCurrentSlideDto = {
+  slide_index: number;
+  total_slides: number;
+  slide: { id: number; title?: string } | null;
+  objects: LiveSlideObjectDto[];
+};
+
 export const startLive = (payload: FormData) =>
   api.post<LiveSessionDto>("/live/sessions/start/", payload, {
     headers: { "Content-Type": "multipart/form-data" },
@@ -80,16 +95,27 @@ export const liveHeartbeat = (liveId: number, currentSlideIndex?: number) =>
       : {}
   );
 
-export const submitLiveCheckin = (liveId: number, slideIndex: number, reactionMs: number) =>
+export const getLiveCurrentSlide = (liveId: number) =>
+  api.get<LiveCurrentSlideDto>(`/live/sessions/${liveId}/current-slide/`);
+
+export const submitLiveCheckin = (
+  liveId: number,
+  slideIndex: number,
+  reactionMs: number,
+  answerData?: Record<string, any>
+) =>
   api.post<{
     awarded_points: number;
     rank: number | null;
+    is_correct: boolean;
+    is_answerable: boolean;
     detail?: string;
     participant: LiveParticipantDto;
     leaderboard: LiveParticipantDto[];
   }>(`/live/sessions/${liveId}/checkin/`, {
     slide_index: slideIndex,
     reaction_ms: reactionMs,
+    answer_data: answerData || {},
   });
 
 export const getLiveLeaderboard = (liveId: number) =>
@@ -102,4 +128,6 @@ export const getActiveLives = () =>
   api.get<LiveSessionDto[]>("/live/sessions/active/");
 
 export const getLiveByCode = (code: string) =>
-  api.get<LiveSessionDto>(`/live/sessions/by-code/${encodeURIComponent(code)}/`);
+  api.get<LiveSessionDto>(
+    `/live/sessions/by-code/${encodeURIComponent((code || "").trim().toUpperCase())}/`
+  );
